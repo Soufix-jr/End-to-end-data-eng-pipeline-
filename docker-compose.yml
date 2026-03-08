@@ -1,0 +1,10 @@
+version: "3.8"
+
+networks:
+  pipeline-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  spark_checkpoints:
+```
