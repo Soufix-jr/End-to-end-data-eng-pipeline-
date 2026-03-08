@@ -1,0 +1,409 @@
+# Real-Time Market Intelligence Pipeline — Architecture & Implementation Plan
+
+## Overview
+
+Build an **end-to-end, dockerized, streaming data engineering pipeline** that ingests real-time stock trades and financial news from **Finnhub**, processes them through **Kafka → Spark Structured Streaming**, enriches news with **HuggingFace NLP sentiment analysis**, stores results in **PostgreSQL + TimescaleDB**, orchestrates with **Apache Airflow**, and visualizes business insights via dashboards.
+
+The project is designed **incrementally** — each phase is self-contained, testable, and builds on the previous one.
+
+> [!IMPORTANT]
+> **8GB RAM constraint** — This fundamentally shapes our architecture. Every tool choice below is optimized for low memory. We avoid Cassandra (~2GB), Zookeeper (~500MB), and heavy Spark configs. The pipeline will still be production-representative, just resource-conscious.
+
+---
+
+## Architecture Diagram
+
+```mermaid
+graph LR
+    subgraph "Data Sources"
+        F1["Finnhub WebSocket<br/>(Real-time Trades)"]
+        F2["Finnhub REST API<br/>(Company News)"]
+    end
+
+    subgraph "Message Broker"
+        K["Apache Kafka<br/>(KRaft mode, no Zookeeper)"]
+        T1["Topic: trades"]
+        T2["Topic: news"]
+    end
+
+    subgraph "Stream Processing"
+        S["Spark Structured Streaming"]
+        NLP["HuggingFace FinBERT<br/>(Sentiment Scoring)"]
+    end
+
+    subgraph "Storage"
+        PG["PostgreSQL + TimescaleDB"]
+        DB1["raw_trades (hypertable)"]
+        DB2["raw_news"]
+        DB3["ohlcv_1m / ohlcv_5m"]
+        DB4["sentiment_scores"]
+        DB5["trading_signals"]
+    end
+
+    subgraph "Orchestration"
+        AF["Apache Airflow<br/>(LocalExecutor)"]
+    end
+
+    subgraph "Visualization"
+        VIZ["Power BI / Grafana"]
+    end
+
+    F1 --> T1 --> S
+    F2 --> T2 --> NLP --> S
+    S --> PG
+    AF -->|"monitors & schedules"| S
+    AF -->|"data quality checks"| PG
+    PG --> VIZ
+```
+
+---
+
+## Business Value Narrative
+
+> **Pitch to a business manager:**
+> *"This system monitors stock markets in real-time. When financial news breaks, our AI reads the article in milliseconds and scores whether it's positive or negative. We correlate that sentiment with actual price movements to generate early trading signals. The dashboard shows you — in real time — which stocks are being talked about, whether the news is bullish or bearish, and whether the price is following the sentiment or diverging (which itself is a signal)."*
+
+Key business KPIs we'll surface:
+- **Sentiment-Price Correlation Score** — Does positive news actually move the stock up?
+- **Sentiment Divergence Alerts** — Stock dropping despite positive news = potential opportunity or risk
+- **News Volume Spikes** — Sudden surge in articles about a company = something is happening
+- **Aggregated Sector Sentiment** — Are tech stocks being talked about positively or negatively today?
+
+---
+
+## RAM Budget (8GB total, ~5.5GB for Docker)
+
+| Service | Estimated RAM | Notes |
+|---------|-------------|-------|
+| Kafka (KRaft) | ~600MB | No Zookeeper saves ~500MB |
+| PostgreSQL + TimescaleDB | ~300MB | Lightweight for our data volume |
+| Spark Master | ~256MB | Coordinator only |
+| Spark Worker | ~1GB | Single worker, constrained heap |
+| Airflow (webserver + scheduler) | ~700MB | SQLite backend, LocalExecutor |
+| Python producers (2x) | ~200MB | Trades + News producers |
+| Python NLP consumer | ~800MB | DistilBERT model in memory |
+| **Total** | **~3.9GB** | Leaves room for OS + Docker overhead |
+
+> [!TIP]
+> We won't run everything simultaneously until Phase 5+. In early phases, only 2-3 containers run at a time, keeping RAM usage around 1-2GB.
+
+---
+
+## Phase-by-Phase Implementation
+
+---
+
+### Phase 1: Foundation — Kafka + Finnhub Ingestion
+
+**Goal**: Get real-time data flowing from Finnhub into Kafka topics.
+
+**Distributed Systems Lessons**:
+- *Backpressure*: What if Finnhub sends data faster than Kafka can write? → Producer buffering, `linger.ms`, `batch.size`
+- *Partitioning*: Why do we partition by stock symbol? → Ordering guarantees per symbol
+- *Consumer groups*: How horizontal scaling works — add consumers, Kafka rebalances
+
+#### [NEW] [docker-compose.yml](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/docker-compose.yml)
+- Kafka in KRaft mode (single broker, no Zookeeper)
+- Environment variables for Kafka config
+- Health checks
+
+#### [NEW] [.env.example](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/.env.example)
+- `FINNHUB_API_KEY`, Kafka broker address, DB credentials
+- User copies to `.env` and fills in their key
+
+#### [NEW] [src/producers/trade_producer.py](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/src/producers/trade_producer.py)
+- WebSocket connection to Finnhub for real-time trades
+- Serializes trade data (symbol, price, volume, timestamp) as JSON
+- Publishes to Kafka topic `trades`, partitioned by symbol
+- Handles: reconnection, rate limiting, graceful shutdown
+
+#### [NEW] [src/producers/news_producer.py](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/src/producers/news_producer.py)
+- REST polling of Finnhub `/company-news` endpoint every 60s
+- Publishes to Kafka topic `news`
+- Deduplication via article ID tracking
+- Handles: 429 rate limits with exponential backoff
+
+#### [NEW] [src/consumers/debug_consumer.py](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/src/consumers/debug_consumer.py)
+- Simple consumer that prints messages from both topics
+- Used to verify the pipeline is working before adding Spark
+
+#### [NEW] [src/producers/Dockerfile](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/src/producers/Dockerfile)
+- Python 3.11-slim base image
+- Installs: `confluent-kafka`, `websocket-client`, `requests`
+
+---
+
+### Phase 2: Storage — PostgreSQL + TimescaleDB
+
+**Goal**: Persist raw data for analytics and downstream processing.
+
+**Distributed Systems Lessons**:
+- *Why TimescaleDB over Cassandra?*: Cassandra excels at massive write throughput across clusters, but eats 1-2GB RAM minimum. TimescaleDB gives us time-series superpowers on PostgreSQL with ~300MB. For our scale (dozens of symbols, not millions), this is the right call.
+- *Partitioning in databases*: TimescaleDB auto-partitions by time (chunks). This is the same concept as Kafka partitioning but in storage.
+- *Hot/cold data*: Old data can be compressed or moved — teaches data lifecycle management.
+
+#### [NEW] [db/init.sql](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/db/init.sql)
+- Create hypertables: `raw_trades` (time, symbol, price, volume)
+- Create tables: `raw_news` (id, symbol, headline, summary, url, datetime)
+- Create tables: `ohlcv_1m`, `ohlcv_5m` (time, symbol, open, high, low, close, volume)
+- Create tables: `sentiment_scores` (news_id, symbol, sentiment, confidence, model)
+- Create tables: `trading_signals` (time, symbol, signal_type, sentiment_score, price_change)
+
+#### Modify [docker-compose.yml](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/docker-compose.yml)
+- Add PostgreSQL + TimescaleDB service
+- Mount `db/init.sql` to `/docker-entrypoint-initdb.d/`
+
+#### [NEW] [src/consumers/db_consumer.py](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/src/consumers/db_consumer.py)
+- Kafka consumer → PostgreSQL writer
+- Batch inserts for performance (every 100 messages or 5 seconds)
+- Replaces the debug consumer for production use
+
+---
+
+### Phase 3: Spark Structured Streaming
+
+**Goal**: Real-time aggregations (OHLCV candles) from raw trade data.
+
+**Distributed Systems Lessons**:
+- *Watermarks*: How does Spark handle late-arriving data? What if a trade arrives 30s late?
+- *Checkpointing*: What happens when Spark crashes mid-window? → Exactly-once via WAL checkpoints
+- *OOM*: Your Spark worker has 1GB. What if a window aggregation holds too much state? → Tune `spark.sql.shuffle.partitions`, use `mapGroupsWithState` if needed
+- *Backpressure*: `maxOffsetsPerTrigger` controls how fast Spark reads from Kafka
+
+#### [NEW] [src/spark/stream_processor.py](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/src/spark/stream_processor.py)
+- Read from Kafka `trades` topic
+- Windowed aggregation: 1-min and 5-min OHLCV candles
+- Watermark: 30 seconds for late data
+- Output mode: append → write to PostgreSQL via JDBC
+- Checkpoint directory for fault tolerance
+
+#### [NEW] [src/spark/Dockerfile](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/src/spark/Dockerfile)
+- Based on `bitnami/spark:3.5`
+- Includes Kafka + PostgreSQL JDBC connector JARs
+- Memory-constrained config: `SPARK_WORKER_MEMORY=1g`
+
+#### Modify [docker-compose.yml](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/docker-compose.yml)
+- Add Spark master + 1 worker
+- Network connectivity to Kafka + PostgreSQL
+
+---
+
+### Phase 4: NLP Sentiment Analysis
+
+**Goal**: Score news articles with sentiment using HuggingFace, correlate with price.
+
+**Business Value**:
+- This is the "AI" differentiator. A business manager cares about: *"Can we detect bad news before the stock drops?"*
+- We'll compute a **Sentiment-Price Lag Correlation** to prove (or disprove) that sentiment leads price
+
+**Distributed Systems Lessons**:
+- *GPU vs CPU inference*: No GPU? Use `onnxruntime` for 3-5x CPU speedup
+- *Model size*: FinBERT is ~260MB. DistilBERT is ~130MB. On 8GB RAM, this matters
+- *Batching*: Score 10 articles at once vs 1 at a time = significant throughput gain
+
+#### [NEW] [src/nlp/sentiment_analyzer.py](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/src/nlp/sentiment_analyzer.py)
+- Loads `ProsusAI/finbert` (or distilled variant)
+- Consumes from Kafka `news` topic
+- Scores each article: positive/negative/neutral + confidence
+- Publishes enriched data to Kafka topic `news_scored`
+- Writes to `sentiment_scores` table
+
+#### [NEW] [src/nlp/Dockerfile](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/src/nlp/Dockerfile)
+- Python 3.11-slim
+- Installs: `transformers`, `torch` (CPU-only), `onnxruntime` (optional optimization)
+- Pre-downloads model at build time to avoid runtime delays
+
+#### [NEW] [src/nlp/signal_generator.py](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/src/nlp/signal_generator.py)
+- Joins sentiment scores with recent price data from PostgreSQL
+- Generates simple signals: "Positive news + price flat = potential uptick"
+- Writes to `trading_signals` table
+
+---
+
+### Phase 5: Apache Airflow Orchestration
+
+**Goal**: Automate health checks, batch reprocessing, and report generation.
+
+**Distributed Systems Lessons**:
+- *Why not just cron?*: Airflow gives you DAG dependencies, retries, SLA monitoring, and a UI
+- *Executor types*: LocalExecutor (our choice, low RAM) vs CeleryExecutor (distributed, needs Redis) vs KubernetesExecutor (cloud-native)
+- *Scheduler bottleneck*: What if you have 100 DAGs? The scheduler is single-threaded by default → parsing overhead
+
+#### [NEW] [airflow/dags/pipeline_health_dag.py](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/airflow/dags/pipeline_health_dag.py)
+- Checks: Is Kafka producing? Is consumer lag acceptable? Is Spark running?
+- Alerts on failure (email or Slack webhook)
+
+#### [NEW] [airflow/dags/data_quality_dag.py](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/airflow/dags/data_quality_dag.py)
+- SQL-based checks: NULL prices? Duplicate trades? Timestamps in the future?
+- Uses Great Expectations or raw SQL assertions
+
+#### [NEW] [airflow/dags/daily_report_dag.py](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/airflow/dags/daily_report_dag.py)
+- Aggregates daily sentiment summary per symbol
+- Computes daily sentiment-price correlation
+- Writes to `daily_reports` table for dashboard consumption
+
+#### Modify [docker-compose.yml](file:///c:/Users/aserm/OneDrive/Bureau/End-to-end-data-eng-pipeline-/docker-compose.yml)
+- Add Airflow webserver + scheduler (SQLite + LocalExecutor, minimal RAM)
+- Mount DAGs directory
+
+---
+
+### Phase 6: Visualization
+
+**Goal**: Business-facing dashboards that tell a story.
+
+> [!NOTE]
+> We'll decide between **Power BI** (connects to PostgreSQL via ODBC), **Grafana** (dockerized, real-time), or **Apache Superset** (dockerized, SQL-native) when we reach this phase. All three work with our PostgreSQL backend.
+
+Planned dashboards:
+1. **Real-Time Market Pulse** — Live price ticker + sentiment overlay
+2. **Sentiment Heatmap** — Which stocks are being talked about? Positive or negative?
+3. **Signal Performance** — Did our sentiment signals predict price movements?
+4. **Pipeline Health** — Kafka lag, Spark throughput, data freshness
+
+---
+
+### Phase 7: Observability & Hardening
+
+- Docker resource limits (`deploy.resources.limits`)
+- Health checks for every service
+- Dead letter queue in Kafka for failed messages
+- Retry logic with exponential backoff
+- Comprehensive `README.md` with architecture diagrams
+
+---
+
+## Project Structure
+
+```
+End-to-end-data-eng-pipeline-/
+├── docker-compose.yml
+├── .env.example
+├── .gitignore
+├── README.md
+├── src/
+│   ├── producers/
+│   │   ├── Dockerfile
+│   │   ├── requirements.txt
+│   │   ├── trade_producer.py
+│   │   └── news_producer.py
+│   ├── consumers/
+│   │   ├── debug_consumer.py
+│   │   └── db_consumer.py
+│   ├── spark/
+│   │   ├── Dockerfile
+│   │   ├── stream_processor.py
+│   │   └── requirements.txt
+│   └── nlp/
+│       ├── Dockerfile
+│       ├── requirements.txt
+│       ├── sentiment_analyzer.py
+│       └── signal_generator.py
+├── db/
+│   └── init.sql
+├── airflow/
+│   ├── dags/
+│   │   ├── pipeline_health_dag.py
+│   │   ├── data_quality_dag.py
+│   │   └── daily_report_dag.py
+│   └── Dockerfile
+├── grafana/
+│   └── dashboards/        (if using Grafana)
+├── docs/
+│   ├── architecture.md
+│   ├── distributed_systems_notes.md
+│   └── business_value.md
+└── scripts/
+    ├── start.sh
+    └── stop.sh
+```
+
+---
+
+## Verification Plan
+
+Each phase has its own verification before moving to the next:
+
+### Phase 1 Verification
+```bash
+# 1. Start Kafka
+docker compose up -d kafka
+
+# 2. Start trade producer
+docker compose up -d trade-producer
+
+# 3. Verify messages in Kafka
+docker compose exec kafka kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic trades --from-beginning --max-messages 10
+
+# 4. Check logs for errors
+docker compose logs trade-producer --tail 50
+```
+
+### Phase 2 Verification
+```bash
+# 1. Start PostgreSQL
+docker compose up -d postgres
+
+# 2. Verify tables exist
+docker compose exec postgres psql -U pipeline -d market_data -c "\dt"
+
+# 3. Start db consumer, wait 60s, check data
+docker compose up -d db-consumer
+sleep 60
+docker compose exec postgres psql -U pipeline -d market_data -c "SELECT COUNT(*) FROM raw_trades;"
+```
+
+### Phase 3 Verification
+```bash
+# 1. Start Spark
+docker compose up -d spark-master spark-worker
+
+# 2. Check Spark UI at http://localhost:8080
+# 3. Verify OHLCV data appearing
+docker compose exec postgres psql -U pipeline -d market_data -c "SELECT * FROM ohlcv_1m ORDER BY time DESC LIMIT 5;"
+```
+
+### Phase 4 Verification
+```bash
+# 1. Start NLP service
+docker compose up -d sentiment-analyzer
+
+# 2. Check sentiment scores
+docker compose exec postgres psql -U pipeline -d market_data -c "SELECT * FROM sentiment_scores ORDER BY created_at DESC LIMIT 5;"
+
+# 3. Verify signal generation
+docker compose exec postgres psql -U pipeline -d market_data -c "SELECT * FROM trading_signals LIMIT 5;"
+```
+
+### Phase 5 Verification
+```bash
+# 1. Start Airflow
+docker compose up -d airflow-webserver airflow-scheduler
+
+# 2. Open Airflow UI at http://localhost:8081
+# 3. Trigger DAGs manually and verify they complete
+# 4. Check task logs in Airflow UI for errors
+```
+
+### End-to-End Smoke Test
+```bash
+# Full pipeline startup
+docker compose up -d
+
+# Wait 2 minutes for data to flow
+sleep 120
+
+# Verify data at each stage
+docker compose exec postgres psql -U pipeline -d market_data -c "
+  SELECT 'raw_trades' as table_name, COUNT(*) as row_count FROM raw_trades
+  UNION ALL
+  SELECT 'raw_news', COUNT(*) FROM raw_news
+  UNION ALL
+  SELECT 'ohlcv_1m', COUNT(*) FROM ohlcv_1m
+  UNION ALL
+  SELECT 'sentiment_scores', COUNT(*) FROM sentiment_scores;
+"
+```
+
+> [!CAUTION]
+> **Don't run all services at once until Phase 5+.** With 8GB RAM, running Kafka + Spark + Airflow + NLP simultaneously will likely cause Docker OOM kills. During Phases 1-4, only run the services relevant to that phase.
