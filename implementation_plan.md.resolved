@@ -6,8 +6,12 @@ Build an **end-to-end, dockerized, streaming data engineering pipeline** that in
 
 The project is designed **incrementally** — each phase is self-contained, testable, and builds on the previous one.
 
-> [!IMPORTANT]
-> **16GB RAM available** — This gives us comfortable headroom for all services. We use KRaft-mode Kafka (no Zookeeper) and TimescaleDB (instead of Cassandra) to keep things efficient, but we can run the full stack simultaneously from Phase 3 onward.
+> [!IMPORTANT]  
+> **Hardware Constraints & Collaboration Strategy:**  
+> - **Destination Machine (16GB RAM):** Can run the full stack simultaneously.
+> - **Local Dev Machine (8GB RAM):** Cannot run the full stack (~10-12GB required). Will use the **"Start-Test-Kill"** method to test components in isolation.
+> - **Automation:** We use a `Makefile` or helper scripts (e.g., `make up-kafka`, `make up-spark`) to guarantee that the logic works on *both* machines. If it works via `make up-kafka` on 8GB, it will work via `make up-all` on 16GB.
+> - **Production Habits:** We will prioritize proper logging, `.env` configurations, and idempotent operations so code is production-ready when merged.
 
 ---
 
@@ -97,6 +101,12 @@ Key business KPIs we'll surface:
 
 **Goal**: Get real-time data flowing from Finnhub into Kafka topics.
 
+**8GB "Start-Test-Kill" Workflow:**
+1. Run `make up-kafka` (Uses ~800MB RAM)
+2. Run producers locally via Python
+3. Verify with `debug_consumer.py`
+4. Run `make down` to free RAM
+
 **Distributed Systems Lessons**:
 - *Backpressure*: What if Finnhub sends data faster than Kafka can write? → Producer buffering, `linger.ms`, `batch.size`
 - *Partitioning*: Why do we partition by stock symbol? → Ordering guarantees per symbol
@@ -137,6 +147,12 @@ Key business KPIs we'll surface:
 
 **Goal**: Persist raw data for analytics and downstream processing.
 
+**8GB "Start-Test-Kill" Workflow:**
+1. Run `make up-db` (Uses ~300MB RAM)
+2. Test schema creation (`init.sql`)
+3. Run `make up-kafka-db` (Uses ~1.1GB RAM) to test pipeline writing to DB
+4. Run `make down` to free RAM
+
 **Distributed Systems Lessons**:
 - *Why TimescaleDB over Cassandra?*: Cassandra excels at massive write throughput across clusters, but eats 1-2GB RAM minimum. TimescaleDB gives us time-series superpowers on PostgreSQL with ~300MB. For our scale (dozens of symbols, not millions), this is the right call.
 - *Partitioning in databases*: TimescaleDB auto-partitions by time (chunks). This is the same concept as Kafka partitioning but in storage.
@@ -163,6 +179,12 @@ Key business KPIs we'll surface:
 ### Phase 3: Spark Structured Streaming
 
 **Goal**: Real-time aggregations (OHLCV candles) from raw trade data.
+
+**8GB "Start-Test-Kill" Workflow:**
+1. Run `make up-kafka-spark` (Uses ~2.5GB RAM)
+2. Run Python producer locally to feed data
+3. Watch Spark UI or DB writes
+4. Run `make down` to free RAM
 
 **Distributed Systems Lessons**:
 - *Watermarks*: How does Spark handle late-arriving data? What if a trade arrives 30s late?
@@ -277,6 +299,7 @@ Planned dashboards:
 
 ```
 End-to-end-data-eng-pipeline-/
+├── Makefile                (Automates starting/stopping specific services)
 ├── docker-compose.yml
 ├── .env.example
 ├── .gitignore
