@@ -1,1 +1,26 @@
+# Environment
 .env
+__pycache__/
+*.pyc
+
+# Virtual Environments
+venv/
+.venv/
+env/
+.env/
+
+# Data & Databases
+postgres_data/
+*.db
+*.sqlite3
+
+# HuggingFace & ML Models
+.hf_cache/
+.cache/
+
+# IDEs
+.vscode/
+.idea/
+
+# Logs
+docker_out.txt

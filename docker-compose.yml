@@ -1,0 +1,107 @@
+services:
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # KAFKA (KRaft Mode — no Zookeeper, saves ~500MB RAM)
+  # ──────────────────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft settings — Kafka manages itself, no Zookeeper needed
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Topic auto-creation — useful in dev, disable in prod
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Set to 1 for single-broker dev setup
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Required for KRaft mode — any unique base64 string
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    healthcheck:
+      test: [ "CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list" ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - pipeline-net
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+  # ──────────────────────────────────────────────────────────────────────────
+  # POSTGRESQL + TIMESCALEDB
+  # ──────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pipeline-net
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # SPARK (Master + Worker)
+  # ──────────────────────────────────────────────────────────────────────────
+  spark-master:
+    image: apache/spark:3.5.3
+    container_name: spark-master
+    command: /opt/spark/sbin/start-master.sh
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    environment:
+      SPARK_MASTER_HOST: spark-master
+    networks:
+      - pipeline-net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  spark-worker:
+    image: apache/spark:3.5.3
+    container_name: spark-worker
+    command: /opt/spark/sbin/start-worker.sh spark://spark-master:7077
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_WORKER_MEMORY: 1g
+      SPARK_WORKER_CORES: 1
+    networks:
+      - pipeline-net
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+
+networks:
+  pipeline-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
