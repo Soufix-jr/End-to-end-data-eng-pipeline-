@@ -1,3 +1,5 @@
+version: "3.8"
+
 services:
 
   # ──────────────────────────────────────────────────────────────────────────
@@ -105,3 +107,4 @@ networks:
 
 volumes:
   postgres_data:
+  spark_checkpoints:
