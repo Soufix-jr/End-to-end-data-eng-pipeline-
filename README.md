@@ -51,12 +51,31 @@ rolls trades into 1m / 5m OHLCV candles for charts.
 Requires Docker Desktop. The stack is split into compose profiles so you
 can run a subset on an 8GB laptop.
 
+Linux / macOS / WSL:
 ```bash
 cp .env.example .env          # set FINNHUB_API_KEY
 make up-nlp                   # infra + ingest + NLP + decisions  (~3 GB)
 make up-dash                  # add Grafana on http://localhost:3000  (admin/admin)
-make smoke                    # row counts in each table
+make smoke
 make logs S=decision_engine
+```
+
+Windows cmd / PowerShell (use the bundled `make.bat`):
+```cmd
+copy .env.example .env
+notepad .env
+make up-nlp
+make up-dash
+make smoke
+make logs S=decision_engine
+```
+
+Or just call docker compose directly:
+```cmd
+docker compose --profile nlp up -d --build
+docker compose --profile dashboard up -d
+docker compose ps
+docker compose logs -f --tail=200 decision_engine
 ```
 
 Profiles:
