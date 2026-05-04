@@ -78,7 +78,7 @@ def on_message(ws, message):
     """Called every time a new message arrives from Finnhub."""
     data = json.loads(message)
 
-    # Finnhub also sends "ping" type messages — ignore non-trade messages
+    # Finnhub also sends "ping" type messages - ignore non-trade messages
     if data.get("type") != "trade":
         return
 
@@ -98,7 +98,7 @@ def on_message(ws, message):
             callback=delivery_report,
         )
 
-    # poll() triggers delivery callbacks — call often to avoid buffer overflow
+    # poll() triggers delivery callbacks - call often to avoid buffer overflow
     producer.poll(0)
 
 

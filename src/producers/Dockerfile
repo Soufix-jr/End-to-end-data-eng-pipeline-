@@ -9,7 +9,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source files after deps — changes here won't invalidate the pip layer
+# Copy source files after deps - changes here won't invalidate the pip layer
 COPY trade_producer.py .
 COPY news_producer.py .
 

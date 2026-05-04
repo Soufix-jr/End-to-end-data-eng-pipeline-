@@ -1,0 +1,93 @@
+{
+  "uid": "pipeline-main",
+  "title": "Market Intelligence Pipeline",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-1h", "to": "now" },
+  "tags": ["pipeline", "trading"],
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Latest price by symbol",
+      "type": "timeseries",
+      "datasource": { "type": "postgres", "uid": "Timescale" },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [{
+        "format": "time_series",
+        "rawSql": "SELECT time AS \"time\", symbol AS metric, price FROM raw_trades WHERE $__timeFilter(time) ORDER BY time"
+      }]
+    },
+    {
+      "id": 2,
+      "title": "Aggregated sentiment (FinBERT scored articles)",
+      "type": "timeseries",
+      "datasource": { "type": "postgres", "uid": "Timescale" },
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [{
+        "format": "time_series",
+        "rawSql": "SELECT n.published_at AS \"time\", r.sentiment AS metric, AVG(r.sentiment_score) AS score FROM nlp_results r JOIN raw_news n ON n.id = r.news_id WHERE $__timeFilter(n.published_at) GROUP BY 1, 2 ORDER BY 1"
+      }]
+    },
+    {
+      "id": 3,
+      "title": "Signals (open / close)",
+      "type": "table",
+      "datasource": { "type": "postgres", "uid": "Timescale" },
+      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 },
+      "targets": [{
+        "format": "table",
+        "rawSql": "SELECT time, symbol, action, price, confidence, horizon, reason FROM signals WHERE $__timeFilter(time) ORDER BY time DESC LIMIT 100"
+      }]
+    },
+    {
+      "id": 4,
+      "title": "Open positions",
+      "type": "table",
+      "datasource": { "type": "postgres", "uid": "Timescale" },
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "targets": [{
+        "format": "table",
+        "rawSql": "SELECT id, symbol, side, entry_time, entry_price, target_price, stop_price, valid_until, confidence FROM positions WHERE status='OPEN' ORDER BY entry_time DESC"
+      }]
+    },
+    {
+      "id": 5,
+      "title": "Closed P&L (last 24h)",
+      "type": "stat",
+      "datasource": { "type": "postgres", "uid": "Timescale" },
+      "gridPos": { "x": 12, "y": 16, "w": 6, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [{
+        "format": "table",
+        "rawSql": "SELECT COALESCE(SUM(pnl_pct), 0) AS pnl_pct FROM positions WHERE status='CLOSED' AND exit_time > now() - interval '24 hours'"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percent" } }
+    },
+    {
+      "id": 6,
+      "title": "Win rate (last 24h)",
+      "type": "stat",
+      "datasource": { "type": "postgres", "uid": "Timescale" },
+      "gridPos": { "x": 18, "y": 16, "w": 6, "h": 4 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [{
+        "format": "table",
+        "rawSql": "SELECT 100.0 * SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS win_rate FROM positions WHERE status='CLOSED' AND exit_time > now() - interval '24 hours'"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percent" } }
+    },
+    {
+      "id": 7,
+      "title": "Closed positions (last 50)",
+      "type": "table",
+      "datasource": { "type": "postgres", "uid": "Timescale" },
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 4 },
+      "targets": [{
+        "format": "table",
+        "rawSql": "SELECT entry_time, symbol, side, entry_price, exit_price, exit_reason, pnl_pct FROM positions WHERE status='CLOSED' ORDER BY exit_time DESC NULLS LAST LIMIT 50"
+      }]
+    }
+  ]
+}

@@ -18,14 +18,14 @@ MODELS USED:
      → Extracts named entities: people (PER), organizations (ORG),
        locations (LOC), miscellaneous (MISC)
 
-DATA ENGINEER LESSON — Batch Processing vs Stream Processing:
+DATA ENGINEER LESSON - Batch Processing vs Stream Processing:
   The news producer + Kafka = stream processing (real-time, continuous)
   This NLP script = batch processing (run once, process everything)
   Both are valid. Batch is simpler and fine when you don't need
   sub-second latency. You'd switch to stream if you needed instant
   sentiment scores for algorithmic trading.
 
-DATA ENGINEER LESSON — Model Loading:
+DATA ENGINEER LESSON - Model Loading:
   Loading a model from disk takes 5-10 seconds. Running inference
   on 100 articles takes ~30 seconds. So we load models ONCE at
   startup and reuse them for all articles. Never load inside a loop.
@@ -307,7 +307,7 @@ def main():
         for i in range(min(5, valid_count)):
             print(f"\n📰 {articles[i][1]}")
             print(f"   Sentiment:  {sentiments[i]['label']} ({sentiments[i]['score']})")
-            print(f"   Topic:      Cluster {topics[i]['cluster']} — {topics[i]['label']}")
+            print(f"   Topic:      Cluster {topics[i]['cluster']} - {topics[i]['label']}")
             print(f"   Entities:   {[e['name'] for e in entities[i]]}")
     else:
         log.error("Failed to process articles. Check logs above.")
