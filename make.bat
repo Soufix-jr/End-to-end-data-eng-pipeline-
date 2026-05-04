@@ -74,10 +74,11 @@ goto :eof
 docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --list
 goto :eof
 :logs
-REM Accepts "make logs S=service_name"
-set SVC=%ARG:S==%
+REM Accepts "make logs S=service_name" or "make logs service_name"
+set "SVC=%ARG%"
+if "%SVC:~0,2%"=="S=" set "SVC=%SVC:~2%"
 if "%SVC%"=="" (
-  echo Usage: make logs S=service_name
+  echo Usage: make logs S=service_name  or  make logs service_name
   goto :eof
 )
 docker compose logs -f --tail=200 %SVC%
