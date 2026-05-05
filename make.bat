@@ -84,6 +84,8 @@ if "%SVC%"=="" (
 docker compose logs -f --tail=200 %SVC%
 goto :eof
 :smoke
+set PGUSER=pipeline
+set PGDB=market_data
 for /f "usebackq tokens=1,2 delims==" %%a in (".env") do (
   if /I "%%a"=="POSTGRES_USER" set PGUSER=%%b
   if /I "%%a"=="POSTGRES_DB"   set PGDB=%%b
