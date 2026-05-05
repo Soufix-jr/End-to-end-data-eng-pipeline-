@@ -38,7 +38,7 @@
         "iconColor": "#FF9830",
         "target": {
           "rawQuery": true,
-          "rawSql": "SELECT time AS time, symbol || ' ' || action AS text, action AS tags FROM signals WHERE $__timeFilter(time) AND (symbol IN ($symbol) OR '$symbol' = '$__all')",
+          "rawSql": "SELECT time AS time, symbol || ' ' || action AS text, action AS tags FROM signals WHERE $__timeFilter(time)",
           "format": "table"
         }
       }
@@ -220,7 +220,7 @@
       },
       "targets": [{
         "format": "time_series",
-        "rawSql": "SELECT time AS \"time\", symbol AS metric, price FROM raw_trades WHERE $__timeFilter(time) AND (symbol IN ($symbol) OR '$symbol' = '$__all') ORDER BY time"
+        "rawSql": "SELECT time AS \"time\", symbol AS metric, price FROM raw_trades WHERE $__timeFilter(time) ORDER BY time"
       }]
     },
     {
@@ -323,7 +323,7 @@
       },
       "targets": [{
         "format": "time_series",
-        "rawSql": "SELECT time_bucket('1 minute', time) AS \"time\", COUNT(*)::int AS trades FROM raw_trades WHERE $__timeFilter(time) AND (symbol IN ($symbol) OR '$symbol' = '$__all') GROUP BY 1 ORDER BY 1"
+        "rawSql": "SELECT time_bucket('1 minute', time) AS \"time\", COUNT(*)::int AS trades FROM raw_trades WHERE $__timeFilter(time) GROUP BY 1 ORDER BY 1"
       }]
     },
 
@@ -381,7 +381,7 @@
       },
       "targets": [{
         "format": "table",
-        "rawSql": "SELECT time, symbol, action, price, confidence, horizon, reason FROM signals WHERE $__timeFilter(time) AND (symbol IN ($symbol) OR '$symbol' = '$__all') ORDER BY time DESC LIMIT 100"
+        "rawSql": "SELECT time, symbol, action, price, confidence, horizon, reason FROM signals WHERE $__timeFilter(time) ORDER BY time DESC LIMIT 100"
       }]
     },
     {
@@ -410,7 +410,7 @@
       },
       "targets": [{
         "format": "table",
-        "rawSql": "SELECT id, symbol, side, entry_time, entry_price, target_price, stop_price, valid_until, confidence FROM positions WHERE status='OPEN' AND (symbol IN ($symbol) OR '$symbol' = '$__all') ORDER BY entry_time DESC"
+        "rawSql": "SELECT id, symbol, side, entry_time, entry_price, target_price, stop_price, valid_until, confidence FROM positions WHERE status='OPEN' ORDER BY entry_time DESC"
       }]
     },
     {
@@ -467,7 +467,7 @@
       },
       "targets": [{
         "format": "table",
-        "rawSql": "SELECT entry_time, symbol, side, entry_price, exit_price, exit_reason, pnl_pct FROM positions WHERE status='CLOSED' AND (symbol IN ($symbol) OR '$symbol' = '$__all') ORDER BY exit_time DESC NULLS LAST LIMIT 50"
+        "rawSql": "SELECT entry_time, symbol, side, entry_price, exit_price, exit_reason, pnl_pct FROM positions WHERE status='CLOSED' ORDER BY exit_time DESC NULLS LAST LIMIT 50"
       }]
     }
   ]
