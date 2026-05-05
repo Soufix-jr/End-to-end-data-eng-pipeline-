@@ -21,7 +21,7 @@ SPARK STRUCTURED STREAMING CONCEPTS:
   - Checkpoint: saves processing state to disk so Spark can recover
     from crashes without losing or duplicating data (exactly-once)
 
-DATA ENGINEER LESSON — When to use Spark vs plain Python:
+DATA ENGINEER LESSON - When to use Spark vs plain Python:
   100 articles/min → plain Python is fine
   10,000 trades/sec → you NEED Spark for windowed aggregations
   Spark adds overhead (JVM, cluster setup), so don't use it when
@@ -138,7 +138,7 @@ def main():
 
     # ── Write 1-min candles to PostgreSQL ────────────────────────────────────
     query_1m = ohlcv_1m.writeStream \
-        .outputMode("update") \
+        .outputMode("append") \
         .foreachBatch(lambda df, id: write_to_postgres(df, id, "ohlcv_1m")) \
         .option("checkpointLocation", f"{CHECKPOINT_DIR}/ohlcv_1m") \
         .trigger(processingTime="30 seconds") \
@@ -146,7 +146,7 @@ def main():
 
     # ── Write 5-min candles to PostgreSQL ────────────────────────────────────
     query_5m = ohlcv_5m.writeStream \
-        .outputMode("update") \
+        .outputMode("append") \
         .foreachBatch(lambda df, id: write_to_postgres(df, id, "ohlcv_5m")) \
         .option("checkpointLocation", f"{CHECKPOINT_DIR}/ohlcv_5m") \
         .trigger(processingTime="60 seconds") \

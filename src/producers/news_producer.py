@@ -17,12 +17,12 @@ DATA SHAPE from Finnhub /news endpoint (one article):
   "url":       "https://reuters.com/..."
 }
 
-DATA ENGINEER LESSON — Deduplication:
+DATA ENGINEER LESSON - Deduplication:
   REST polling every 60s risks re-publishing articles we've already seen.
   We track seen article IDs in a local set. In production, you'd use Redis
   or a database for distributed deduplication across multiple workers.
 
-DATA ENGINEER LESSON — Rate Limiting (429):
+DATA ENGINEER LESSON - Rate Limiting (429):
   Finnhub free tier: 60 API calls/minute.
   General news = 1 call per cycle, so we're well within limits.
   We still add exponential backoff in case we get a 429 response.
@@ -53,7 +53,8 @@ load_dotenv()
 FINNHUB_API_KEY = os.environ["FINNHUB_API_KEY"]
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC = "news"
-POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "60"))
+POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
+SEEN_IDS_MAX = int(os.getenv("SEEN_IDS_MAX", "5000"))
 
 # ── Kafka Producer ────────────────────────────────────────────────────────────
 producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS})
@@ -67,7 +68,7 @@ def delivery_report(err, msg):
 def fetch_general_news() -> list:
     """
     Call Finnhub /news?category=general to get broad market news.
-    No stock symbol required — returns articles about the whole market.
+    No stock symbol required - returns articles about the whole market.
     """
     url = "https://finnhub.io/api/v1/news"
     params = {
@@ -102,7 +103,8 @@ def fetch_general_news() -> list:
 
 # ── Main polling loop ─────────────────────────────────────────────────────────
 def run():
-    seen_ids: set = set()
+    from collections import OrderedDict
+    seen_ids: "OrderedDict[int, None]" = OrderedDict()
     log.info(f"Starting news producer (general market news). Polling every {POLL_INTERVAL_SECONDS}s")
 
     while True:
@@ -115,7 +117,9 @@ def run():
             if article_id in seen_ids:
                 continue
 
-            seen_ids.add(article_id)
+            seen_ids[article_id] = None
+            if len(seen_ids) > SEEN_IDS_MAX:
+                seen_ids.popitem(last=False)
 
             # Add ingestion metadata
             article["ingested_at"] = int(time.time() * 1000)

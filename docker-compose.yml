@@ -1,9 +1,18 @@
-version: "3.8"
+# ----------------------------------------------------------------------------
+# COMPOSE PROFILES
+#
+#   docker compose --profile infra up -d              # Kafka + Postgres only
+#   docker compose --profile ingest up -d             # + producers + db_consumer
+#   docker compose --profile nlp up -d                # + streaming_nlp + decision_engine
+#   docker compose --profile dashboard up -d          # + Grafana
+#   docker compose --profile spark up -d              # + spark master/worker
+#   docker compose --profile full up -d               # everything
+# ----------------------------------------------------------------------------
 
 services:
 
   # ──────────────────────────────────────────────────────────────────────────
-  # KAFKA (KRaft Mode — no Zookeeper, saves ~500MB RAM)
+  # KAFKA (KRaft Mode - no Zookeeper, saves ~500MB RAM)
   # ──────────────────────────────────────────────────────────────────────────
   kafka:
     image: confluentinc/cp-kafka:7.6.0
@@ -11,7 +20,6 @@ services:
     ports:
       - "9092:9092"
     environment:
-      # KRaft settings — Kafka manages itself, no Zookeeper needed
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
@@ -20,33 +28,30 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      # Topic auto-creation — useful in dev, disable in prod
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      # Set to 1 for single-broker dev setup
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      # Required for KRaft mode — any unique base64 string
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
     healthcheck:
-      test: [ "CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list" ]
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
       interval: 15s
       timeout: 10s
       retries: 5
-    networks:
-      - pipeline-net
+    networks: [pipeline-net]
+    profiles: [infra, ingest, nlp, spark, dashboard, full]
     deploy:
       resources:
-        limits:
-          memory: 1G
+        limits: {memory: 1G}
+
   # ──────────────────────────────────────────────────────────────────────────
   # POSTGRESQL + TIMESCALEDB
   # ──────────────────────────────────────────────────────────────────────────
   postgres:
     image: timescale/timescaledb:latest-pg15
     container_name: postgres
-    ports:
-      - "5432:5432"
+    ports: ["5432:5432"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -59,47 +64,169 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - pipeline-net
+    networks: [pipeline-net]
+    profiles: [infra, ingest, nlp, spark, dashboard, full]
     deploy:
       resources:
-        limits:
-          memory: 1G
+        limits: {memory: 768M}
 
   # ──────────────────────────────────────────────────────────────────────────
-  # SPARK (Master + Worker)
+  # PRODUCERS - Finnhub WebSocket (trades) + REST poll (news) → Kafka
+  # ──────────────────────────────────────────────────────────────────────────
+  trade_producer:
+    build: ./src/producers
+    container_name: trade_producer
+    command: ["python", "-u", "trade_producer.py"]
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      kafka: {condition: service_healthy}
+    networks: [pipeline-net]
+    profiles: [ingest, nlp, full]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: {memory: 128M}
+
+  news_producer:
+    build: ./src/producers
+    container_name: news_producer
+    command: ["python", "-u", "news_producer.py"]
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      kafka: {condition: service_healthy}
+    networks: [pipeline-net]
+    profiles: [ingest, nlp, full]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: {memory: 128M}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # DB CONSUMER - persists trades + news to Postgres
+  # ──────────────────────────────────────────────────────────────────────────
+  db_consumer:
+    build: ./src/consumers
+    container_name: db_consumer
+    command: ["python", "-u", "db_consumer.py"]
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      POSTGRES_HOST: postgres
+    depends_on:
+      kafka:    {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    networks: [pipeline-net]
+    profiles: [ingest, nlp, full]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: {memory: 256M}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # STREAMING NLP - FinBERT scores each headline as it arrives
+  #   (loaded once, ~450MB resident; pinned to 2 CPU threads)
+  # ──────────────────────────────────────────────────────────────────────────
+  streaming_nlp:
+    build: ./src/nlp
+    container_name: streaming_nlp
+    command: ["python", "-u", "streaming_nlp.py"]
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      POSTGRES_HOST: postgres
+      NLP_NUM_THREADS: "2"
+    volumes:
+      - hf_cache:/root/.hf_cache
+    depends_on:
+      kafka:    {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    networks: [pipeline-net]
+    profiles: [nlp, full]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: {memory: 700M, cpus: "1.5"}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # DECISION ENGINE - joins trades + sentiment cache, emits BUY/SELL/HOLD
+  # ──────────────────────────────────────────────────────────────────────────
+  decision_engine:
+    build: ./src/decision_engine
+    container_name: decision_engine
+    command: ["python", "-u", "decision_engine.py"]
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      POSTGRES_HOST: postgres
+    depends_on:
+      kafka:    {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    networks: [pipeline-net]
+    profiles: [nlp, full]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: {memory: 192M}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # SPARK (Master + Worker) - only on 16GB / "spark" or "full" profile
   # ──────────────────────────────────────────────────────────────────────────
   spark-master:
     image: apache/spark:3.5.3
     container_name: spark-master
     command: /opt/spark/sbin/start-master.sh
-    ports:
-      - "8080:8080"
-      - "7077:7077"
+    ports: ["8080:8080", "7077:7077"]
     environment:
       SPARK_MASTER_HOST: spark-master
-    networks:
-      - pipeline-net
+    networks: [pipeline-net]
+    profiles: [spark, full]
     deploy:
       resources:
-        limits:
-          memory: 512M
+        limits: {memory: 512M}
 
   spark-worker:
     image: apache/spark:3.5.3
     container_name: spark-worker
     command: /opt/spark/sbin/start-worker.sh spark://spark-master:7077
-    depends_on:
-      - spark-master
+    depends_on: [spark-master]
     environment:
       SPARK_WORKER_MEMORY: 1g
       SPARK_WORKER_CORES: 1
-    networks:
-      - pipeline-net
+    networks: [pipeline-net]
+    profiles: [spark, full]
     deploy:
       resources:
-        limits:
-          memory: 1.5G
+        limits: {memory: 1.5G}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # GRAFANA  (live dashboards: price, sentiment, signals, P&L)
+  # ──────────────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: grafana
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [pipeline-net]
+    profiles: [dashboard, full]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: {memory: 256M}
 
 networks:
   pipeline-net:
@@ -107,4 +234,6 @@ networks:
 
 volumes:
   postgres_data:
+  hf_cache:
+  grafana_data:
   spark_checkpoints:

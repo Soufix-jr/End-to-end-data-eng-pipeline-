@@ -20,7 +20,7 @@ WHAT TO OBSERVE:
   - After 60s, news articles appear (headline, source, symbol)
   - Each message shows which partition it came from → verify same symbol = same partition
 
-DATA ENGINEER LESSON — Consumer Groups:
+DATA ENGINEER LESSON - Consumer Groups:
   A consumer group allows horizontal scaling. If you start 2 instances of
   this consumer with the same group_id, Kafka splits the partitions between them.
   E.g., AAPL trades → Consumer A, TSLA trades → Consumer B.
@@ -52,7 +52,7 @@ consumer = Consumer({
 })
 
 # Subscribe to both topics
-consumer.subscribe(["news"])
+consumer.subscribe(["trades", "news", "news_enriched", "signals"])
 
 
 def shutdown(signum, frame):
@@ -77,7 +77,7 @@ if __name__ == "__main__":
 
             if msg.error():
                 if msg.error().code() == KafkaError._PARTITION_EOF:
-                    # Reached end of partition — normal in low-volume scenarios
+                    # Reached end of partition - normal in low-volume scenarios
                     continue
                 else:
                     log.error(f"Kafka error: {msg.error()}")
@@ -104,6 +104,18 @@ if __name__ == "__main__":
                 log.info(
                     f"[NEWS] partition={partition} | key={key} | "
                     f"headline={value.get('headline', '')[:80]}..."
+                )
+            elif topic == "news_enriched":
+                log.info(
+                    f"[NLP] key={key} | sentiment={value.get('sentiment')} "
+                    f"({value.get('sentiment_score')}) | symbols={value.get('symbols')} "
+                    f"| headline={value.get('headline','')[:60]}..."
+                )
+            elif topic == "signals":
+                log.info(
+                    f"[SIGNAL] key={key} | {value.get('action')} {value.get('symbol')} "
+                    f"@ {value.get('price')} conf={value.get('confidence')} "
+                    f"horizon={value.get('horizon')} | {value.get('reason')}"
                 )
 
     except KeyboardInterrupt:
