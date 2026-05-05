@@ -57,6 +57,23 @@ SYMBOLS_HINT = {s.strip().upper() for s in os.getenv("SYMBOLS", "AAPL").split(",
 
 TICKER_RE = re.compile(r"\b[A-Z]{2,5}\b")
 
+# Company-name -> ticker. General news says "Apple" not "AAPL", so the bare
+# ticker regex misses them. This map covers the symbols we care about.
+NAME_TO_TICKER = {
+    "apple": "AAPL",
+    "microsoft": "MSFT",
+    "tesla": "TSLA",
+    "nvidia": "NVDA",
+    "amazon": "AMZN",
+    "meta": "META",
+    "facebook": "META",
+    "google": "GOOGL",
+    "alphabet": "GOOGL",
+    "netflix": "NFLX",
+    "intel": "INTC",
+    "amd": "AMD",
+}
+
 
 def load_finbert():
     import torch
@@ -75,17 +92,29 @@ def load_finbert():
 
 
 def extract_symbols(article: dict) -> list:
-    """Pull tickers from Finnhub 'related' field, fall back to uppercase tokens."""
+    """
+    Pull tickers from three sources:
+      1. Finnhub 'related' field (when populated)
+      2. Bare ticker mentions in headline / summary (e.g. "AAPL")
+      3. Company-name mentions (e.g. "Apple" -> AAPL)
+    """
     found = set()
     related = article.get("related") or ""
     for tok in related.split(","):
         tok = tok.strip().upper()
-        if tok:
+        if tok in SYMBOLS_HINT:
             found.add(tok)
+
     text = f"{article.get('headline','')} {article.get('summary','')}"
     for tok in TICKER_RE.findall(text):
         if tok in SYMBOLS_HINT:
             found.add(tok)
+
+    text_lower = text.lower()
+    for name, ticker in NAME_TO_TICKER.items():
+        if ticker in SYMBOLS_HINT and name in text_lower:
+            found.add(ticker)
+
     return sorted(found)
 
 
